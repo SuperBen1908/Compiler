@@ -3,25 +3,28 @@
 #include <string.h>
 #include "../inc/lexer.h"
 
-#define CAP 10
+#define CAP         32
+#define CAP_EXP_THR (1<<20)
+
 
 lexer_err_e lexer_parse(const char  *buf,
                         size_t       buf_size,
                         token_tab_t *token_tab)
 {
-  lexer_err_e err = 0; 
+  lexer_err_e err = LEXER_OK; 
 
   typedef enum char_type_e {
-    LETTER = 1,
+    INVALID_CHAR = 0,
+    LETTER,
     NUMBER,
     OPERATOR,
     PARENTHESES,
     QUOTES,
-    PP,
-    BS,
+    SPECIAL,
     SPACE,
   } char_type_e;
   char_type_e char_type_lut[256] = {0};
+  char escape_characters[256] = {0};
 
   for (char l = 'A'; l < 'Z'; ++l)
     char_type_lut[l] = LETTER;
@@ -47,21 +50,48 @@ lexer_err_e lexer_parse(const char  *buf,
 
   char_type_lut['\"'] = QUOTES;      char_type_lut['\''] = QUOTES;
                                      
-  char_type_lut['#']  = PP;          char_type_lut['\\'] = BS;
+  char_type_lut['.']  = SPECIAL;
+  char_type_lut['#']  = SPECIAL;
+  char_type_lut['\\'] = SPECIAL;
                                      
   char_type_lut[' ']  = SPACE;       char_type_lut['\t'] = SPACE;
   char_type_lut['\n'] = SPACE;       char_type_lut['\r'] = SPACE;
 
+
+  escape_characters['t']  = '\t'; escape_characters['v']  = '\v';
+  escape_characters['r']  = '\r'; escape_characters['n']  = '\n';
+  escape_characters['a']  = '\a'; escape_characters['b']  = '\b';
+  escape_characters['e']  = '\e'; escape_characters['f']  = '\f';
+  escape_characters['\"'] = '\"'; escape_characters['\''] = '\'';
+  escape_characters['\\'] = '\\';
+
   token_tab->cap = CAP;
   token_tab->n_lines = 0;
-  token_tab->token_lines = malloc(token_tab->cap * sizeof(*token_tab->token_lines));
+  token_tab->token_lines = calloc(sizeof(*token_tab->token_lines), token_tab->cap);
   if (!token_tab->token_lines)
     goto defer;
 
   const char *p = buf;
   while (p - buf < buf_size) {
-    while (p - buf < buf_size && char_type_lut[*p] == SPACE)
+    while (p - buf < buf_size && char_type_lut[*p] == SPACE) {
+      if (*p == '\n') {
+
+        /* Add token to current line */
+        if (token_tab->n_lines >= token_tab->cap) {
+          if (token_tab->cap < CAP_EXP_THR)
+            token_tab->cap <<= 1;
+          else
+            token_tab->cap += CAP_EXP_THR;
+
+          void *ret = realloc(token_tab->token_lines, token_tab->cap * sizeof(*token_tab->token_lines));
+          if (ret) {
+          }
+        }
+        
+        token_tab->token_lines++;
+      }
       ++p;
+    }
 
     const char *tok_start = p;
     token_type_e tok_type = 0;
@@ -80,14 +110,14 @@ lexer_err_e lexer_parse(const char  *buf,
       break;
       case NUMBER:
       {
-        tok_type = CONSTANT_DEC;
-
         if (*p != '0') {
+          tok_type = CONSTANT_DEC;
           /* Decimal */
           while (p - buf < buf_size && char_type_lut[*p] == NUMBER)
             ++p;
         }
-        else {
+
+        if (*p == '0' && tok_type != CONSTANT_DEC) {
           /* starts with 0, advance ot next character and parse it */
           ++p;
           if (p - buf < buf_size)
@@ -138,25 +168,15 @@ lexer_err_e lexer_parse(const char  *buf,
             break;
             default:
             {
-              if (*p == '.') {
-                tok_type = CONSTANT_FLOAT;
+              if (char_type_lut[*p] != NUMBER || *p == 0 || *p > '7')
+                break;
 
-                /* Float */
-                while (p - buf < buf_size &&
-                      (char_type_lut[*p] == NUMBER))
-                  ++p;
-              }
-              else {
-                if (char_type_lut[*p] != NUMBER || *p == 0 || *p > '7')
-                  break;
+              /* Accepts only 0-7 after 0%d */
+              tok_type = CONSTANT_OCT;
 
-                /* Accepts only 0-7 after 0%d */
-                tok_type = CONSTANT_OCT;
-
-                while (p - buf < buf_size &&
-                      (*p >= '0' && *p <= '0'))
-                  ++p;
-              }
+              while (p - buf < buf_size &&
+                    (*p >= '0' && *p <= '7'))
+                ++p;
             }
             break;
           }
@@ -164,6 +184,16 @@ lexer_err_e lexer_parse(const char  *buf,
           if (p - buf < buf_size)
             break;
         }
+
+        if (*p == '.') {
+          tok_type = CONSTANT_FLOAT;
+
+          /* Float */
+          while (p - buf < buf_size &&
+                (char_type_lut[*p] == NUMBER))
+            ++p;
+        }
+
       }
       break;
       case OPERATOR:
@@ -188,18 +218,20 @@ lexer_err_e lexer_parse(const char  *buf,
           break;
 
           case '<':
-          tok_type = OPERATOR_LESS;
+            tok_type = OPERATOR_LESS;
           break;
           case '>':
-          tok_type = OPERATOR_GREATER;
+            tok_type = OPERATOR_GREATER;
           break;
 
           case '!':
             tok_type = OPERATOR_LOGICAL_NOT;
           break;
           case '~':
+          {
             tok_type = OPERATOR_BITWISE_NOT;
             end = 1;
+          }
           break;
           case '&':
             tok_type = OPERATOR_BITWISE_AND;
@@ -212,39 +244,60 @@ lexer_err_e lexer_parse(const char  *buf,
           break;
 
           case '=':
-          tok_type = OPERATOR_ASSIGN;
+            tok_type = OPERATOR_ASSIGN;
+          break;
+
+          case '?':
+          {
+            tok_type = OPERATOR_QUESTION_MARK;
+            end = 1;
+          }
           break;
 
           case ':':
-            tok_type = OPERATOR_TRINARY;
+          {
+            tok_type = SPECIAL_COLON;
             end = 1;
+          }
           break;
-          case '?':
-            tok_type = OPERATOR_QUESTION_MARK;
+          case ',':
+          {
+            tok_type = SPECIAL_COMMA;
             end = 1;
+          }
+          break;
+          case ';':
+          {
+            tok_type = SPECIAL_SEMICOLON;
+            end = 1;
+          }
           break;
         }
+
 
         if (end)
           break;
 
-        char prev_p = *p;
+        /* Second operator */
         ++p;
-        if (p - buf < buf_size)
+        if (p - buf < buf_size ||
+            char_type_lut[*p] != OPERATOR)
           break;
 
-        /* Second operator */
         /* double operation */
-        switch (tok_type) {
-          case OPERATOR_PLUS:
-          case OPERATOR_MINUS:
-          case OPERATOR_ASSIGN:
-          case OPERATOR_LESS:
-          case OPERATOR_GREATER:
-          case OPERATOR_BITWISE_AND:
-          case OPERATOR_BITWISE_OR:
-          {
-            if (prev_p == *p) {
+        if (p[-1] == *p) {
+          switch (tok_type) {
+            case OPERATOR_PLUS:        /* ++ */
+            case OPERATOR_MINUS:       /* -- */
+            case OPERATOR_ASSIGN:      /* == */
+            case OPERATOR_BITWISE_AND: /* && */
+            case OPERATOR_BITWISE_OR:  /* || */
+              end = 1;
+            /* Don't end because <<= and >>= */
+            case OPERATOR_LESS:
+            case OPERATOR_GREATER:
+            {
+
               if ((tok_type & OPERATOR_ARITHMETIC) == OPERATOR_ARITHMETIC) {
                 tok_type ^= OPERATOR_ARITHMETIC;
                 tok_type ^= OPERATOR_UNARY;
@@ -259,22 +312,25 @@ lexer_err_e lexer_parse(const char  *buf,
               if ((tok_type & OPERATOR_RELATIONAL) == OPERATOR_RELATIONAL) {
                 tok_type ^= OPERATOR_RELATIONAL;
                 tok_type ^= OPERATOR_BITWISE;
-                tok_type += 3; /* to bitshift */
+                tok_type += (OPERATOR_BITWISE_LSHIFT ^ OPERATOR_BITWISE) -
+                            (OPERATOR_LESS ^ OPERATOR_RELATIONAL);
                 break;
               }
 
               if ((tok_type & OPERATOR_BITWISE) == OPERATOR_BITWISE) {
-
                 tok_type ^= OPERATOR_BITWISE;
                 tok_type ^= OPERATOR_LOGICAL;
                 break;
               }
             }
+            break;
           }
-          break;
         }
 
-        /* operator assignment */
+        if (end)
+          break;
+
+        /* operator and assignment */
         if (*p == '=') {
           switch (tok_type) {
             case OPERATOR_PLUS:
@@ -285,14 +341,16 @@ lexer_err_e lexer_parse(const char  *buf,
             {
               tok_type ^= OPERATOR_ARITHMETIC;
               tok_type ^= OPERATOR_ASSIGN_ARITHMETIC;
-              tok_type += 1;
+              tok_type += (OPERATOR_ASSIGN_PLUS ^ OPERATOR_ASSIGN_ARITHMETIC) -
+                          (OPERATOR_PLUS ^ OPERATOR_ARITHMETIC);
             }
             break;
 
             case OPERATOR_LESS:
             case OPERATOR_GREATER:
             {
-              tok_type += 2;
+              tok_type += OPERATOR_LEQ -
+                          OPERATOR_LESS;
             }
             break;
 
@@ -302,67 +360,149 @@ lexer_err_e lexer_parse(const char  *buf,
             }
             break;
 
-            case OPERATOR_BITWISE_AND:
             case OPERATOR_BITWISE_OR:
+            case OPERATOR_BITWISE_AND:
             case OPERATOR_BITWISE_XOR:
             {
               tok_type ^= OPERATOR_BITWISE;
               tok_type ^= OPERATOR_ASSIGN_BITWISE;
-              tok_type -= 1;
+              tok_type += (OPERATOR_ASSIGN_OR ^ OPERATOR_ASSIGN_BITWISE) -
+                          (OPERATOR_BITWISE_OR ^ OPERATOR_BITWISE);
             }
             break;
           }
         }
 
-        switch (tok_type) {
-          case OPERATOR_PLUS:
+        /* Arrow */
+        if (tok_type == OPERATOR_MINUS && *p == '>') {
+          tok_type = SPECIAL_ARROW;
           break;
-          case OPERATOR_MINUS:
-          break;
-          case OPERATOR_MUL:
-          break;
-          case OPERATOR_DIV:
-          break;
-          case OPERATOR_MOD:
+        }
+
+        /* Third operator */
+        ++p;
+        if (p - buf < buf_size ||
+            char_type_lut[*p] != OPERATOR)
           break;
 
-          case OPERATOR_LOGICAL_NOT:
+        if (*p == '=') {
+          switch (tok_type) {
+            case OPERATOR_BITWISE_LSHIFT:
+              tok_type = OPERATOR_ASSIGN_LSHIFT;
+            break;
+
+            case OPERATOR_BITWISE_RSHIFT:
+              tok_type = OPERATOR_ASSIGN_RSHIFT;
+            break;
+          }
+        }
+
+        if (tok_type == 0)
+          err = LEXER_INVALID_OPERATOR;
+      }
+      break;
+      case PARENTHESES:
+      {
+        switch (*p) {
+          case '(':
+            tok_type = SPECIAL_O_PARENTHESIS;
           break;
-          case OPERATOR_BITWISE_NOT:
-          break;
-          case OPERATOR_BITWISE_AND:
-          break;
-          case OPERATOR_BITWISE_OR:
-          break;
-          case OPERATOR_BITWISE_XOR:
+          case ')':
+            tok_type = SPECIAL_C_PARENTHESIS;
           break;
 
-          case OPERATOR_ASSIGN:
+          case '{':
+            tok_type = SPECIAL_O_BRACE;
           break;
-          case OPERATOR_LESS:
-          break;
-          case OPERATOR_GREATER:
+          case '}':
+            tok_type = SPECIAL_C_BRACE;
           break;
 
-          default:
+          case '[':
+            tok_type = SPECIAL_O_BRACKET;
+          break;
+          case ']':
+            tok_type = SPECIAL_C_BRACKET;
           break;
         }
       }
       break;
-      case PARENTHESES:
-      break;
       case QUOTES:
+      {
+        switch (*p) {
+          case '\"':
+            tok_type = CONSTANT_STRING;
+          break;
+          case '\'':
+            tok_type = CONSTANT_CHAR;
+          break;
+        }
+
+        /* parses one character in string each iteration */
+        do {
+          ++p;
+          if (p - buf < buf_size)
+            break;
+
+          /* escape */
+          if (*p == '\\') {
+            ++p;
+            if (p - buf < buf_size || !escape_characters[*p]) {
+              err = LEXER_INVALID_ESCAPE;
+              goto defer;
+            }
+            ++p;
+            if (p - buf < buf_size)
+              break;
+          }
+
+          if (*p == '\'' && tok_type == CONSTANT_CHAR ||
+              *p == '\"' && tok_type == CONSTANT_STRING) {
+            ++p;
+            break;
+          }
+
+        } while (tok_type == CONSTANT_STRING);
+      }
+
       break;
-      case PP:
+      case SPECIAL:
+      {
+        switch (*p) {
+          case '.':
+            tok_type = SPECIAL_DOT;
+          break;
+          case '#':
+            tok_type = SPECIAL_HASH;
+          break;
+          case '\\':
+            tok_type = SPECIAL_BACKSLASH;
+          break;
+        }
+      }
       break;
-      case BS:
-      break;
-      default:
-      break;
+    }
+
+    if (err)
+      goto defer;
+
+
+    /* Add token to current line */
+    if (token_tab->n_lines >= token_tab->cap) {
+      if (token_tab->cap < CAP_EXP_THR)
+        token_tab->cap <<= 1;
+      else
+        token_tab->cap += CAP_EXP_THR;
+
+      void *ret = realloc(token_tab->token_lines, token_tab->cap * sizeof(*token_tab->token_lines));
+      if (ret) {
+        
+      }
     }
 
     size_t tok_len = p-tok_start;
     size_t n_toks  = token_tab->token_lines[token_tab->n_lines].n_tokens;
+
 
     token_tab->token_lines[token_tab->n_lines].tokens[n_toks].str = malloc(tok_len+1);
     if (!token_tab->token_lines[token_tab->n_lines].tokens[n_toks].str)
@@ -371,6 +511,8 @@ lexer_err_e lexer_parse(const char  *buf,
     memcpy(token_tab->token_lines[token_tab->n_lines].tokens[n_toks].str,
            tok_start,
            tok_len);
+    token_tab->token_lines[token_tab->n_lines].tokens[n_toks].str[tok_len] = 0;
+
     ++token_tab->token_lines[token_tab->n_lines].n_tokens;
   }
 

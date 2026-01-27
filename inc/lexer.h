@@ -265,7 +265,9 @@ const char *const *const tokens_str[][16] = { {
 
 
 typedef enum lexer_err_e {
-  SOM_ERROR_IDK = 1,
+  LEXER_OK = 0,
+  LEXER_INVALID_OPERATOR,
+  LEXER_INVALID_ESCAPE,
 } lexer_err_e;
 
 
